@@ -1,96 +1,69 @@
 # -*- coding: utf-8 -*-
 """
-退休提領回測工具
+退休提領回測工具（Streamlit 版）
 比較「固定提領」與「Guyton-Klinger 動態提領」兩種策略。
-你只要改最上面【設定區】和【資料區】的數字，其它都不用動。
+本機測試：streamlit run app.py
 """
 
-import matplotlib
-import matplotlib.pyplot as plt
+import streamlit as st
+import pandas as pd
 
-# =====================================================================
-# 【設定區】← 平常只改這裡
-# =====================================================================
-PRINCIPAL = 1000      # 初始本金（萬元）
-INIT_RATE = 6         # 初始提領率（%）
-INFLATION = 3         # 年通膨率（%）
-STRATEGY  = "GK"      # 策略："固定" 或 "GK"
+st.set_page_config(page_title="退休提領回測", page_icon="📉", layout="wide")
 
-# --- GK 動態提領的護欄參數（不確定就用預設值）---
-INFL_CAP = 6          # 通膨調整上限（%）
-BAND     = 20         # 護欄帶寬（±%）
-STEP     = 10         # 每次調整幅度（%）
-
-# =====================================================================
-# 【資料區】← 每年的報酬率（%），請換成你自己算出來的真實數據
-# 這裡先放 0050 的「範例」報酬（憑記憶估算，不精確）
-# =====================================================================
-START_YEAR = 2004
-RETURNS = [5.3, 10.0, 20.6, 11.2, -42.7, 73.9, 12.8, -15.8, 11.6, 11.5,
-           16.7, -6.3, 19.7, 18.1, -4.9, 32.7, 31.1, 21.8, -21.8, 27.9, 47.0]
+st.title("📉 退休提領回測工具")
+st.caption("固定提領 vs. Guyton-Klinger 動態提領")
 
 
 # =====================================================================
-# 【引擎】← 核心計算，看懂就好，平常不用改
+# 引擎（跟終端機版完全一樣的核心邏輯）
 # =====================================================================
 def run_backtest(principal, init_rate, inflation, strategy, returns,
-                 infl_cap=6, band=20, step=10):
-    rate0     = init_rate / 100      # 初始提領率（小數）
-    inf       = inflation / 100      # 通膨（小數）
-    cap       = infl_cap / 100       # 通膨上限（小數）
-    band_v    = band / 100           # 護欄帶寬（小數）
-    step_v    = step / 100           # 調整幅度（小數）
+                 start_year, infl_cap=6, band=20, step=10):
+    rate0  = init_rate / 100
+    inf    = inflation / 100
+    cap    = infl_cap / 100
+    band_v = band / 100
+    step_v = step / 100
 
-    portfolio     = principal               # 目前資產
-    prev_withdraw = rate0 * principal       # 上一年的提領金額
-    prev_ret      = 0.0                      # 上一年的市場報酬
-    rows          = []                       # 存每一年的結果
-    bankrupt_year = None                     # 哪一年破產（None = 沒破產）
+    portfolio     = principal
+    prev_withdraw = rate0 * principal
+    prev_ret      = 0.0
+    rows          = []
+    bankrupt_year = None
 
     for i, r_pct in enumerate(returns):
         start = portfolio
-        if start <= 0:                       # 資產見底 → 破產，停止
-            bankrupt_year = START_YEAR + i
+        if start <= 0:
+            bankrupt_year = start_year + i
             break
-        ret = r_pct / 100                    # 當年市場報酬（小數）
+        ret = r_pct / 100
 
-        # --- 決定今年要領多少 ---
         if i == 0:
-            # 第一年：本金 × 初始提領率
             withdraw = rate0 * principal
         elif strategy == "固定":
-            # 固定提領：不管市場，每年金額照通膨往上加
             withdraw = prev_withdraw * (1 + inf)
-        else:
-            # GK 動態提領
+        else:  # GK
             cand = prev_withdraw
-            # ① 通膨規則：前一年有賺才加通膨（上限 cap），前一年賠就不加
-            if prev_ret >= 0:
+            if prev_ret >= 0:                       # ① 通膨規則
                 cand *= (1 + min(inf, cap))
-            # 用「當下資產」算出當前提領率（當作警報器）
-            cur_rate = cand / start
-            # ② 保本規則：提領率太高 → 砍 step%
-            if cur_rate > rate0 * (1 + band_v):
+            cur_rate = cand / start                 # 警報器：當下提領率
+            if cur_rate > rate0 * (1 + band_v):     # ② 保本規則
                 cand *= (1 - step_v)
-            # ③ 繁榮規則：提領率太低 → 加 step%
-            elif cur_rate < rate0 * (1 - band_v):
+            elif cur_rate < rate0 * (1 - band_v):   # ③ 繁榮規則
                 cand *= (1 + step_v)
             withdraw = cand
 
-        # 不能領超過剩下的錢
         actual = min(withdraw, start)
-        # 先領錢、再讓剩下的部位吃當年市場漲跌
         end = (start - actual) * (1 + ret)
 
         rows.append({
-            "year":     START_YEAR + i,
-            "start":    start,
-            "withdraw": actual,
-            "rate":     actual / start * 100,   # 當年實際提領率
-            "ret":      r_pct,
-            "end":      max(end, 0),
+            "年度":   start_year + i,
+            "期初資產": round(start),
+            "當年提領": round(actual),
+            "提領率%": round(actual / start * 100, 1),
+            "市場報酬%": r_pct,
+            "期末資產": round(max(end, 0)),
         })
-
         prev_withdraw = withdraw
         prev_ret      = ret
         portfolio     = max(end, 0)
@@ -99,59 +72,90 @@ def run_backtest(principal, init_rate, inflation, strategy, returns,
 
 
 # =====================================================================
-# 【執行 + 印出結果】
+# 側邊欄：設定
 # =====================================================================
-rows, bankrupt = run_backtest(PRINCIPAL, INIT_RATE, INFLATION, STRATEGY,
-                              RETURNS, INFL_CAP, BAND, STEP)
+with st.sidebar:
+    st.header("⚙️ 設定")
+    principal = st.number_input("初始本金（萬元）", value=1000, step=100)
+    init_rate = st.number_input("初始提領率（%）", value=6.0, step=0.5)
+    inflation = st.number_input("年通膨率（%）", value=3.0, step=0.5)
+    strategy  = st.radio("提領策略", ["固定", "GK"], index=1, horizontal=True)
 
-print("=" * 64)
-print(f"  策略：{STRATEGY}提領　|　本金 {PRINCIPAL} 萬　|　初始提領率 {INIT_RATE}%　|　通膨 {INFLATION}%")
-print("=" * 64)
-print(f"{'年度':<6}{'期初資產':>10}{'當年提領':>10}{'提領率':>8}{'市場報酬':>10}{'期末資產':>10}")
-print("-" * 64)
-for r in rows:
-    print(f"{r['year']:<6}{r['start']:>10.0f}{r['withdraw']:>10.0f}"
-          f"{r['rate']:>7.1f}%{r['ret']:>9.1f}%{r['end']:>10.0f}")
-print("-" * 64)
+    if strategy == "GK":
+        st.divider()
+        st.caption("GK 護欄參數")
+        infl_cap = st.number_input("通膨調整上限（%）", value=6.0)
+        band     = st.number_input("護欄帶寬（±%）", value=20.0)
+        step     = st.number_input("每次調整幅度（%）", value=10.0)
+    else:
+        infl_cap, band, step = 6.0, 20.0, 10.0
 
-final = rows[-1]["end"] if rows else PRINCIPAL
-total = sum(r["withdraw"] for r in rows)
+    st.divider()
+    start_year = st.number_input("起始年份", value=2004, step=1)
+
+
+# =====================================================================
+# 主畫面：可編輯的報酬資料
+# =====================================================================
+st.subheader("📊 每年報酬率（可直接編輯）")
+st.caption("⚠️ 預設為 0050 範例（估算值），請換成你自己 NAV 算出來的真實年報酬。可在表格最下方新增/刪除列。")
+
+default_returns = [5.3, 10.0, 20.6, 11.2, -42.7, 73.9, 12.8, -15.8, 11.6, 11.5,
+                   16.7, -6.3, 19.7, 18.1, -4.9, 32.7, 31.1, 21.8, -21.8, 27.9, 47.0]
+df_in = pd.DataFrame({"報酬率(%)": default_returns})
+
+edited = st.data_editor(
+    df_in, num_rows="dynamic", use_container_width=True,
+    column_config={"報酬率(%)": st.column_config.NumberColumn(format="%.1f")},
+    height=300,
+)
+
+# 把編輯後的報酬抓出來（去掉空白列）
+returns = [float(x) for x in edited["報酬率(%)"].dropna().tolist()]
+
+
+# =====================================================================
+# 跑回測
+# =====================================================================
+if len(returns) == 0:
+    st.warning("請至少輸入一年的報酬率。")
+    st.stop()
+
+rows, bankrupt = run_backtest(principal, init_rate, inflation, strategy,
+                              returns, int(start_year), infl_cap, band, step)
+
+res = pd.DataFrame(rows)
+final = res["期末資產"].iloc[-1] if len(res) else principal
+total = int(res["當年提領"].sum()) if len(res) else 0
+
+
+# =====================================================================
+# 結果卡片
+# =====================================================================
+st.subheader("結果")
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("期末資產", f"{final:,.0f} 萬")
 if bankrupt:
-    print(f"  結果：💀 第 {bankrupt} 年破產")
+    c2.metric("結果", "💀 破產", f"第 {bankrupt} 年")
 else:
-    print(f"  結果：✅ 撐住了，期末資產 {final:.0f} 萬")
-print(f"  累計提領：{total:.0f} 萬")
-print("=" * 64)
+    c2.metric("結果", "✅ 撐住了")
+c3.metric("累計提領", f"{total:,.0f} 萬")
+c4.metric("最低點資產", f"{res['期末資產'].min():,.0f} 萬")
 
 
 # =====================================================================
-# 【畫圖】期末資產走勢 + 每年提領金額
+# 圖表（用 Streamlit 原生圖表，中文不會變方框）
 # =====================================================================
-# 讓中文能正常顯示（找得到就用，找不到就跳過、用英文）
-for f in ["Microsoft JhengHei", "PingFang TC", "Noto Sans CJK TC", "WenQuanYi Micro Hei"]:
-    try:
-        matplotlib.rcParams["font.sans-serif"] = [f]
-        matplotlib.rcParams["axes.unicode_minus"] = False
-        break
-    except Exception:
-        pass
+st.subheader("資產走勢")
+chart_df = res.set_index("年度")[["期末資產"]]
+st.line_chart(chart_df, color="#0e2a47")
 
-years      = [r["year"] for r in rows]
-ends       = [r["end"] for r in rows]
-withdraws  = [r["withdraw"] for r in rows]
+st.subheader("每年提領金額")
+st.bar_chart(res.set_index("年度")[["當年提領"]], color="#c8a24b")
 
-fig, ax1 = plt.subplots(figsize=(11, 5))
-ax2 = ax1.twinx()
-ax2.bar(years, withdraws, color="#e3c87f", alpha=0.7, label="當年提領")
-ax1.plot(years, ends, color="#0e2a47", linewidth=2.5, marker="o", label="期末資產")
-ax1.axhline(PRINCIPAL, color="#c8a24b", linestyle="--", label="起始本金")
 
-ax1.set_ylabel("資產（萬元）")
-ax2.set_ylabel("提領（萬元）")
-ax1.set_title(f"{STRATEGY}提領　{INIT_RATE}% 起　通膨 {INFLATION}%")
-ax1.set_zorder(2); ax1.patch.set_visible(False)   # 讓線蓋在長條上面
-fig.legend(loc="upper left", bbox_to_anchor=(0.1, 0.95))
-plt.tight_layout()
-plt.savefig("backtest_result.png", dpi=120)   # 存成圖檔
-plt.show()                                     # 跳出視窗（本機執行時）
-print("圖已存成 backtest_result.png")
+# =====================================================================
+# 逐年明細
+# =====================================================================
+st.subheader("逐年明細")
+st.dataframe(res, use_container_width=True, hide_index=True)
