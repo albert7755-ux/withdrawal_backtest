@@ -95,15 +95,22 @@ def analyze(strategy, principal, init_rate, inflation, returns, start_year,
 
 def fetch_annual_returns(ticker, sy, ey):
     import yfinance as yf
-    raw = yf.download(ticker, start=f"{sy-1}-11-01", end=f"{ey+1}-01-15",
-                      auto_adjust=True, progress=False)
-    if raw is None or raw.empty:
-        return None, "抓不到資料，請確認代碼是否正確。"
-    close = raw["Close"]
+    # 用 Ticker.history(period="max") 抓「全部歷史」，比 download(start,end) 完整、穩定
+    hist = None
+    try:
+        hist = yf.Ticker(ticker).history(period="max", auto_adjust=True)
+    except Exception:
+        hist = None
+    if hist is None or hist.empty:                       # 退而求其次
+        hist = yf.download(ticker, period="max", auto_adjust=True, progress=False)
+    if hist is None or hist.empty:
+        return None, "抓不到資料，請確認代碼是否正確、或稍後再試。"
+    close = hist["Close"]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
-    yearly = close.resample("YE").last().dropna()
-    rets = (yearly.pct_change() * 100).dropna()
+    close = close[close > 0].dropna()                    # 濾掉 0/NaN 壞點
+    yearly = close.resample("YE").last().dropna()        # 每年年底收盤
+    rets = (yearly.pct_change() * 100).dropna()          # 年報酬 %
     rets = rets[(rets.index.year >= sy) & (rets.index.year <= ey)]
     if len(rets) == 0:
         return None, "這段期間沒有足夠資料計算年報酬。"
@@ -125,6 +132,7 @@ DEFAULT = [5.3, 10.0, 20.6, 11.2, -42.7, 73.9, 12.8, -15.8, 11.6, 11.5,
 
 st.session_state.setdefault("returns", DEFAULT)
 st.session_state.setdefault("sy_w", 2004)
+st.session_state.setdefault("data_version", 0)
 
 
 # =====================================================================
@@ -169,8 +177,8 @@ with tool_tab:
         name = st.selectbox("選擇標的", list(PRESETS.keys()))
         ticker = PRESETS[name] or st.text_input("輸入代碼（例如 AAPL、^DJI）", value="")
         c1, c2 = st.columns(2)
-        sy = c1.number_input("起始年", min_value=1990, max_value=2025, value=2010, step=1)
-        ey = c2.number_input("結束年", min_value=1991, max_value=2025, value=2024, step=1)
+        sy = c1.number_input("起始年", min_value=1990, max_value=2026, value=2004, step=1)
+        ey = c2.number_input("結束年", min_value=1991, max_value=2026, value=2025, step=1)
         if st.button("📥 抓取資料", type="primary"):
             if not ticker:
                 st.warning("請先輸入代碼。")
@@ -184,17 +192,18 @@ with tool_tab:
                     else:
                         st.session_state["returns"] = rets
                         st.session_state["sy_w"] = info
+                        st.session_state["data_version"] += 1
                         st.success(f"✅ 抓到 {len(rets)} 年（{info}-{info + len(rets) - 1}）")
                 except Exception as e:
                     st.error(f"抓取失敗：{e}")
                     st.caption("雲端有時會被 Yahoo 限流，可改用『手動輸入』或稍後再試。")
         st.caption("ℹ️ 指數（^GSPC、^SOX）為價格報酬不含息；個股/ETF（0050.TW、SPY）已含息。")
+        st.caption("⚠️ Yahoo 的台股（如 0050.TW）歷史常只到 2010 年左右、舊年份偶有錯誤。"
+                   "要完整 2003 年起的真實含息資料，建議用 FundDJ／cnYES／TWSE 等來源手動貼上。")
 
     with t_manual:
         st.caption("⚠️ 預設為 0050 範例（估算值）。直接點表格『報酬率』欄改數字即可。")
-        new_sy = st.number_input("起始年份", value=int(st.session_state["sy_w"]),
-                                 step=1, key="manual_sy")
-        st.session_state["sy_w"] = int(new_sy)
+        st.number_input("起始年份", min_value=1980, max_value=2035, step=1, key="sy_w")
 
     # 可編輯表格
     start_year = int(st.session_state["sy_w"])
@@ -207,13 +216,21 @@ with tool_tab:
             "年度": st.column_config.NumberColumn(format="%d"),
             "報酬率(%)": st.column_config.NumberColumn(format="%.1f"),
         },
-        height=320,
+        height=320, key=f"editor_{st.session_state['data_version']}",
     )
     returns = [float(x) for x in edited["報酬率(%)"].tolist()]
     st.session_state["returns"] = returns
 
     if len(returns) == 0:
         st.warning("請至少輸入一年的報酬率。"); st.stop()
+
+    bad = [(years[i], returns[i]) for i in range(len(returns)) if abs(returns[i]) > 60]
+    if bad:
+        items = "、".join(f"{y} 年 {r:+.1f}%" for y, r in bad)
+        st.warning(
+            f"⚠️ 這幾年波動偏大：{items}。有些是真的（0050 在 2008 約 −44%、2009 約 +74%），"
+            f"但也可能是資料源的錯誤點，建議和可靠來源核對後再用。"
+        )
 
     args = (principal, init_rate, inflation, returns, start_year, infl_cap, band, step)
 
