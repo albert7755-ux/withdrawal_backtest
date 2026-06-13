@@ -7,6 +7,7 @@
 
 import streamlit as st
 import pandas as pd
+from pathlib import Path
 
 st.set_page_config(page_title="退休提領回測", page_icon="📉", layout="wide")
 
@@ -117,6 +118,19 @@ def fetch_annual_returns(ticker, sy, ey):
     return [round(float(x), 1) for x in rets.values], int(rets.index.year[0])
 
 
+@st.cache_data
+def load_builtin_0050():
+    """讀取與 app.py 放在一起的 0050_data.csv，算「完整年度」的年報酬。"""
+    path = Path(__file__).parent / "0050_data.csv"
+    df = pd.read_csv(path, parse_dates=["date"]).dropna().sort_values("date").set_index("date")
+    year = df.index.year
+    last_close = df["close"].groupby(year).last()
+    last_month = pd.Series(df.index.month, index=df.index).groupby(year).max()
+    lc = last_close[last_month >= 12]                 # 只保留資料到 12 月的完整年度
+    rets = (lc.pct_change() * 100).dropna()
+    return [round(float(x), 1) for x in rets.values], int(rets.index[0])
+
+
 PRESETS = {
     "元大台灣50 (0050.TW)": "0050.TW",
     "標普500 指數 (^GSPC)": "^GSPC",
@@ -171,7 +185,21 @@ tool_tab, guide_tab = st.tabs(["📊 回測工具", "📖 策略說明"])
 # =====================================================================
 with tool_tab:
     st.subheader("📊 報酬率資料")
-    t_online, t_manual = st.tabs(["🌐 線上抓取（Yahoo Finance）", "✍️ 手動輸入"])
+    t_builtin, t_online, t_manual = st.tabs(
+        ["📁 內建 0050（你的資料）", "🌐 線上抓取（Yahoo Finance）", "✍️ 手動輸入"])
+
+    with t_builtin:
+        st.caption("內建 0050 歷史：2004-2023 為含息（還原），2024-2025 以價格報酬估計（約少算配息）。"
+                   "若日後拿到完整含息資料到 2026，替換 0050_data.csv 即可，程式不用動。")
+        if st.button("📁 載入內建 0050 歷史", type="primary"):
+            try:
+                b_rets, b_info = load_builtin_0050()
+                st.session_state["returns"] = b_rets
+                st.session_state["sy_w"] = b_info
+                st.session_state["data_version"] += 1
+                st.success(f"✅ 已載入 {len(b_rets)} 年（{b_info}-{b_info + len(b_rets) - 1}）")
+            except Exception as e:
+                st.error(f"讀取失敗：{e}（請確認 0050_data.csv 與 app.py 放在同一資料夾）")
 
     with t_online:
         name = st.selectbox("選擇標的", list(PRESETS.keys()))
