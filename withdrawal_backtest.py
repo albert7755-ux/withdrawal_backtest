@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-退休提領回測工具（Streamlit 版 v2）
-新增：① 表格標上年度　② 可從 Yahoo Finance 線上抓取指數/股票資料
+退休提領回測工具（Streamlit 版 v3）
+新增：① 比較模式（固定 vs GK 並排）② 策略說明分頁
 本機測試：streamlit run app.py
 """
 
@@ -9,12 +9,10 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="退休提領回測", page_icon="📉", layout="wide")
-st.title("📉 退休提領回測工具")
-st.caption("固定提領 vs. Guyton-Klinger 動態提領")
 
 
 # =====================================================================
-# 引擎（核心邏輯，與前版相同）
+# 引擎
 # =====================================================================
 def run_backtest(principal, init_rate, inflation, strategy, returns,
                  start_year, infl_cap=6, band=20, step=10):
@@ -63,11 +61,39 @@ def run_backtest(principal, init_rate, inflation, strategy, returns,
     return rows, bankrupt_year
 
 
-# =====================================================================
-# 從 Yahoo Finance 抓資料、算每年報酬
-# =====================================================================
+def analyze(strategy, principal, init_rate, inflation, returns, start_year,
+            infl_cap, band, step):
+    """跑一次回測，回傳所有要顯示的統計。"""
+    rows, bankrupt = run_backtest(principal, init_rate, inflation, strategy,
+                                  returns, start_year, infl_cap, band, step)
+    res = pd.DataFrame(rows)
+    final = res["期末資產"].iloc[-1] if len(res) else principal
+    total = int(res["當年提領"].sum()) if len(res) else 0
+
+    vals = [principal] + [r["期末資產"] for r in rows]
+    yrs = ["起始"] + [r["年度"] for r in rows]
+    peak, cpi = vals[0], 0
+    worst, wp, wt = 0.0, 0, 0
+    for i, v in enumerate(vals):
+        if v > peak:
+            peak, cpi = v, i
+        d = (v / peak - 1) * 100 if peak > 0 else 0
+        if d < worst:
+            worst, wp, wt = d, cpi, i
+
+    return {
+        "rows": rows, "res": res, "bankrupt": bankrupt,
+        "final": final, "total": total,
+        "change": final - principal,
+        "change_pct": (final / principal - 1) * 100 if principal else 0,
+        "worst_dd": worst, "dd_amt": vals[wp] - vals[wt],
+        "peak_y": yrs[wp], "trough_y": yrs[wt],
+        "peak_v": vals[wp], "trough_v": vals[wt],
+        "min_v": res["期末資產"].min() if len(res) else principal,
+    }
+
+
 def fetch_annual_returns(ticker, sy, ey):
-    """回傳 (報酬率list, 第一年年份)；失敗回 (None, 錯誤訊息)"""
     import yfinance as yf
     raw = yf.download(ticker, start=f"{sy-1}-11-01", end=f"{ey+1}-01-15",
                       auto_adjust=True, progress=False)
@@ -102,15 +128,23 @@ st.session_state.setdefault("sy_w", 2004)
 
 
 # =====================================================================
-# 側邊欄：設定
+# 側邊欄
 # =====================================================================
 with st.sidebar:
     st.header("⚙️ 設定")
     principal = st.number_input("初始本金（萬元）", value=1000, step=100)
     init_rate = st.number_input("初始提領率（%）", value=6.0, step=0.5)
     inflation = st.number_input("年通膨率（%）", value=3.0, step=0.5)
-    strategy = st.radio("提領策略", ["固定", "GK"], index=1, horizontal=True)
-    if strategy == "GK":
+
+    st.divider()
+    compare = st.checkbox("🔀 比較兩種策略（固定 vs GK）", value=False)
+    if compare:
+        strategy = "GK"
+        st.caption("已開啟比較模式：固定與 GK 並排對照")
+    else:
+        strategy = st.radio("提領策略", ["固定", "GK"], index=1, horizontal=True)
+
+    if compare or strategy == "GK":
         st.divider(); st.caption("GK 護欄參數")
         infl_cap = st.number_input("通膨調整上限（%）", value=6.0)
         band = st.number_input("護欄帶寬（±%）", value=20.0)
@@ -119,87 +153,182 @@ with st.sidebar:
         infl_cap, band, step = 6.0, 20.0, 10.0
 
 
-# =====================================================================
-# 資料來源：手動 or 線上抓取
-# =====================================================================
-st.subheader("📊 報酬率資料")
-tab_online, tab_manual = st.tabs(["🌐 線上抓取（Yahoo Finance）", "✍️ 手動輸入"])
+st.title("📉 退休提領回測工具")
+st.caption("固定提領 vs. Guyton-Klinger 動態提領")
+tool_tab, guide_tab = st.tabs(["📊 回測工具", "📖 策略說明"])
 
-with tab_online:
-    name = st.selectbox("選擇標的", list(PRESETS.keys()))
-    ticker = PRESETS[name] or st.text_input("輸入代碼（例如 AAPL、^DJI）", value="")
-    c1, c2 = st.columns(2)
-    sy = c1.number_input("起始年", min_value=1990, max_value=2025, value=2010, step=1)
-    ey = c2.number_input("結束年", min_value=1991, max_value=2025, value=2024, step=1)
-    if st.button("📥 抓取資料", type="primary"):
-        if not ticker:
-            st.warning("請先輸入代碼。")
-        else:
-            try:
-                with st.spinner(f"從 Yahoo Finance 抓取 {ticker} …"):
-                    rets, info = fetch_annual_returns(ticker, int(sy), int(ey))
-                if rets is None:
-                    st.error(info)
+
+# =====================================================================
+# 分頁一：回測工具
+# =====================================================================
+with tool_tab:
+    st.subheader("📊 報酬率資料")
+    t_online, t_manual = st.tabs(["🌐 線上抓取（Yahoo Finance）", "✍️ 手動輸入"])
+
+    with t_online:
+        name = st.selectbox("選擇標的", list(PRESETS.keys()))
+        ticker = PRESETS[name] or st.text_input("輸入代碼（例如 AAPL、^DJI）", value="")
+        c1, c2 = st.columns(2)
+        sy = c1.number_input("起始年", min_value=1990, max_value=2025, value=2010, step=1)
+        ey = c2.number_input("結束年", min_value=1991, max_value=2025, value=2024, step=1)
+        if st.button("📥 抓取資料", type="primary"):
+            if not ticker:
+                st.warning("請先輸入代碼。")
+            else:
+                try:
+                    with st.spinner(f"從 Yahoo Finance 抓取 {ticker} …"):
+                        rets, info = fetch_annual_returns(ticker, int(sy), int(ey))
+                    if rets is None:
+                        st.error(info)
+                        st.caption("雲端有時會被 Yahoo 限流，可改用『手動輸入』或稍後再試。")
+                    else:
+                        st.session_state["returns"] = rets
+                        st.session_state["sy_w"] = info
+                        st.success(f"✅ 抓到 {len(rets)} 年（{info}-{info + len(rets) - 1}）")
+                except Exception as e:
+                    st.error(f"抓取失敗：{e}")
                     st.caption("雲端有時會被 Yahoo 限流，可改用『手動輸入』或稍後再試。")
+        st.caption("ℹ️ 指數（^GSPC、^SOX）為價格報酬不含息；個股/ETF（0050.TW、SPY）已含息。")
+
+    with t_manual:
+        st.caption("⚠️ 預設為 0050 範例（估算值）。直接點表格『報酬率』欄改數字即可。")
+        new_sy = st.number_input("起始年份", value=int(st.session_state["sy_w"]),
+                                 step=1, key="manual_sy")
+        st.session_state["sy_w"] = int(new_sy)
+
+    # 可編輯表格
+    start_year = int(st.session_state["sy_w"])
+    rets = st.session_state["returns"]
+    years = list(range(start_year, start_year + len(rets)))
+    df_show = pd.DataFrame({"年度": years, "報酬率(%)": rets})
+    edited = st.data_editor(
+        df_show, hide_index=True, disabled=["年度"],
+        column_config={
+            "年度": st.column_config.NumberColumn(format="%d"),
+            "報酬率(%)": st.column_config.NumberColumn(format="%.1f"),
+        },
+        height=320,
+    )
+    returns = [float(x) for x in edited["報酬率(%)"].tolist()]
+    st.session_state["returns"] = returns
+
+    if len(returns) == 0:
+        st.warning("請至少輸入一年的報酬率。"); st.stop()
+
+    args = (principal, init_rate, inflation, returns, start_year, infl_cap, band, step)
+
+    # ---------- 比較模式 ----------
+    if compare:
+        fix = analyze("固定", *args)
+        gk = analyze("GK", *args)
+
+        st.subheader("策略比較")
+        colF, colG = st.columns(2)
+        for col, label, d in [(colF, "固定提領", fix), (colG, "GK 動態", gk)]:
+            with col:
+                st.markdown(f"#### {label}")
+                if d["bankrupt"]:
+                    st.error(f"💀 第 {d['bankrupt']} 年破產")
                 else:
-                    st.session_state["returns"] = rets
-                    st.session_state["sy_w"] = info
-                    st.success(f"✅ 抓到 {len(rets)} 年（{info}-{info + len(rets) - 1}）")
-            except Exception as e:
-                st.error(f"抓取失敗：{e}")
-                st.caption("雲端有時會被 Yahoo 限流，可改用『手動輸入』或稍後再試。")
-    st.caption("ℹ️ 指數（如 ^GSPC、^SOX）為價格報酬，不含配息；個股/ETF（如 0050.TW、SPY）已含息。")
+                    st.success("✅ 撐住了")
+                st.metric("期末資產", f"{d['final']:,.0f} 萬", f"{d['change']:+,.0f} 萬")
+                st.metric("最大回撤", f"{d['worst_dd']:.1f}%")
+                st.metric("回撤最多少掉", f"{d['dd_amt']:,.0f} 萬")
+                st.metric("累計提領", f"{d['total']:,.0f} 萬")
 
-with tab_manual:
-    st.caption("⚠️ 預設為 0050 範例（估算值）。直接點表格的『報酬率』欄改數字即可。")
-    new_sy = st.number_input("起始年份", value=int(st.session_state["sy_w"]), step=1, key="manual_sy")
-    st.session_state["sy_w"] = int(new_sy)
+        st.subheader("資產走勢對比")
+        dfF = fix["res"].set_index("年度")["期末資產"].rename("固定")
+        dfG = gk["res"].set_index("年度")["期末資產"].rename("GK")
+        st.line_chart(pd.concat([dfF, dfG], axis=1), color=["#c8a24b", "#0e2a47"])
+
+        st.subheader("數字總表")
+        def cells(d):
+            return [f"{d['final']:,.0f}", f"{d['change']:+,.0f}", f"{d['total']:,.0f}",
+                    f"{d['worst_dd']:.1f}%", f"{d['dd_amt']:,.0f}",
+                    f"破產@{d['bankrupt']}" if d["bankrupt"] else "撐住"]
+        summary = pd.DataFrame({
+            "指標": ["期末資產(萬)", "資產淨變化(萬)", "累計提領(萬)",
+                     "最大回撤", "回撤少掉(萬)", "結果"],
+            "固定提領": cells(fix), "GK 動態": cells(gk),
+        })
+        st.dataframe(summary, hide_index=True)
+
+    # ---------- 單一策略模式 ----------
+    else:
+        a = analyze(strategy, *args)
+
+        st.subheader("結果")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("期末資產", f"{a['final']:,.0f} 萬", f"{a['change']:+,.0f} 萬")
+        c2.metric("結果", "💀 破產" if a["bankrupt"] else "✅ 撐住了",
+                  f"第 {a['bankrupt']} 年" if a["bankrupt"] else None, delta_color="off")
+        c3.metric("累計提領", f"{a['total']:,.0f} 萬")
+        c4.metric("最低點資產", f"{a['min_v']:,.0f} 萬")
+
+        st.subheader("風險指標")
+        d1, d2, d3 = st.columns(3)
+        d1.metric("資產淨變化", f"{a['change']:+,.0f} 萬", f"{a['change_pct']:+.1f}%")
+        d2.metric("最大回撤", f"{a['worst_dd']:.1f}%")
+        d3.metric("回撤最多少掉", f"{a['dd_amt']:,.0f} 萬")
+        if a["dd_amt"] > 0:
+            st.caption(
+                f"📉 最大回撤發生在 **{a['peak_y']} → {a['trough_y']}**："
+                f"帳戶從 {a['peak_v']:,.0f} 萬一度掉到 {a['trough_v']:,.0f} 萬，"
+                f"少掉 **{a['dd_amt']:,.0f} 萬（{a['worst_dd']:.1f}%）**。"
+                f"此為『提領之後』的實際帳戶波動。"
+            )
+
+        st.subheader("資產走勢")
+        st.line_chart(a["res"].set_index("年度")[["期末資產"]], color="#0e2a47")
+        st.subheader("每年提領金額")
+        st.bar_chart(a["res"].set_index("年度")[["當年提領"]], color="#c8a24b")
+        st.subheader("逐年明細")
+        st.dataframe(a["res"], hide_index=True)
 
 
 # =====================================================================
-# 可編輯表格（年度標清楚！年度欄唯讀，只改報酬率）
+# 分頁二：策略說明
 # =====================================================================
-start_year = int(st.session_state["sy_w"])
-rets = st.session_state["returns"]
-years = list(range(start_year, start_year + len(rets)))
-df_show = pd.DataFrame({"年度": years, "報酬率(%)": rets})
+with guide_tab:
+    st.markdown("""
+## 一句話總覽
+**固定提領**＝不看市場、只跟通膨走的「定速巡航」；
+**GK 動態提領**＝會看帳戶狀況自動調整的「自動駕駛」。
 
-edited = st.data_editor(
-    df_show, hide_index=True, disabled=["年度"],
-    column_config={
-        "年度": st.column_config.NumberColumn(format="%d"),
-        "報酬率(%)": st.column_config.NumberColumn(format="%.1f"),
-    },
-    height=320,
-)
-returns = [float(x) for x in edited["報酬率(%)"].tolist()]
-st.session_state["returns"] = returns
+---
 
+### 🟡 固定提領法
+**怎麼運作**：第一年領「本金 × 提領率」，之後每年金額只跟著通膨往上加，
+**完全不管市場賺賠**。
 
-# =====================================================================
-# 跑回測
-# =====================================================================
-if len(returns) == 0:
-    st.warning("請至少輸入一年的報酬率。"); st.stop()
+- ✅ **優點**：每年能花多少很好預測，生活開銷穩定、好規劃。
+- ⚠️ **缺點**：踩到「報酬順序風險」會出事——一退休就遇大跌，帳戶縮水了你卻照樣領原本金額，等於在變淺的池子舀同樣多水，很容易提早破產。
 
-rows, bankrupt = run_backtest(principal, init_rate, inflation, strategy,
-                              returns, start_year, infl_cap, band, step)
-res = pd.DataFrame(rows)
-final = res["期末資產"].iloc[-1] if len(res) else principal
-total = int(res["當年提領"].sum()) if len(res) else 0
+---
 
-st.subheader("結果")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("期末資產", f"{final:,.0f} 萬")
-c2.metric("結果", "💀 破產" if bankrupt else "✅ 撐住了",
-          f"第 {bankrupt} 年" if bankrupt else None)
-c3.metric("累計提領", f"{total:,.0f} 萬")
-c4.metric("最低點資產", f"{res['期末資產'].min():,.0f} 萬")
+### 🔵 GK 動態提領法（Guyton-Klinger）
+以固定提領為骨架，再加上三道「護欄」自動修正。學界與美國財務顧問圈的主流做法之一。
 
-st.subheader("資產走勢")
-st.line_chart(res.set_index("年度")[["期末資產"]], color="#0e2a47")
-st.subheader("每年提領金額")
-st.bar_chart(res.set_index("年度")[["當年提領"]], color="#c8a24b")
+**三條規則：**
+1. **通膨規則**：前一年有賺 → 提領金額隨通膨調（最多加到「通膨上限」）；前一年賠 → 今年不調。
+2. **保本規則**：當年提領率衝得比初始高出一個「帶寬」（例如 +20%）→ 提領金額**砍 10%**，避免油盡燈枯。
+3. **繁榮規則**：當年提領率掉得比初始低一個帶寬（例如 −20%）→ 提領金額**加 10%**，資產太肥就多花一點。
 
-st.subheader("逐年明細")
-st.dataframe(res, hide_index=True)
+- ✅ **優點**：會對風險做反應，破產機率低、又能在好年頭多花，敢用比較高的初始提領率。
+- ⚠️ **缺點**：每年實際能花的錢會浮動，市場差的年份得忍著少花。
+
+---
+
+### 📚 名詞解釋
+- **報酬順序風險**：就算長期平均報酬一樣，**大跌發生在退休「前期」還是「後期」結果天差地遠**。前期就大跌最傷。
+- **護欄帶寬**：幫提領率畫出一個安全區。以初始 6%、帶寬 ±20% 為例，安全區是 4.8%～7.2%，待在裡面就不調整，衝出去才出手。
+- **最大回撤**：帳戶價值從高點跌到低點，跌最深的那一段。是衡量「過程多嚇人」的指標，跟「最後剩多少」是兩回事。
+
+---
+
+### 🎯 怎麼選？
+根據歷史回測，全股配置下 **6% 初始 + GK 動態** 是相對穩健又靈活的甜蜜點。
+> ⚠️ 高提領率（如 10%）只是極端示範，除非你願意嚴格照護欄調整生活開銷，否則遇上長空頭仍有風險。
+
+打開「比較模式」勾選框，就能把兩種策略的期末資產、最大回撤、累計提領左右並排，一眼看出差別。
+""")
