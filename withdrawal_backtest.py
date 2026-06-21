@@ -131,6 +131,12 @@ def load_builtin_0050():
     return [round(float(x), 1) for x in rets.values], int(rets.index[0])
 
 
+def builtin_dict():
+    """0050 內建資料 → {年: 報酬%} 字典。"""
+    rets, info = load_builtin_0050()
+    return dict(zip(range(info, info + len(rets)), rets))
+
+
 PRESETS = {
     "元大台灣50 (0050.TW)": "0050.TW",
     "標普500 指數 (^GSPC)": "^GSPC",
@@ -185,8 +191,76 @@ tool_tab, guide_tab = st.tabs(["📊 回測工具", "📖 策略說明"])
 # =====================================================================
 with tool_tab:
     st.subheader("📊 報酬率資料")
-    t_builtin, t_online, t_manual = st.tabs(
-        ["📁 內建 0050（你的資料）", "🌐 線上抓取（Yahoo Finance）", "✍️ 手動輸入"])
+    t_portfolio, t_builtin, t_online, t_manual = st.tabs(
+        ["🧺 投資組合", "📁 內建 0050", "🌐 線上抓取", "✍️ 手動輸入"])
+
+    SRC = {
+        "（不使用）": None,
+        "0050（內建含息）": "builtin",
+        "標普500 ^GSPC": "^GSPC",
+        "那斯達克 ^IXIC": "^IXIC",
+        "費城半導體 ^SOX": "^SOX",
+        "SPY": "SPY",
+        "QQQ": "QQQ",
+        "自訂代碼…": "custom",
+    }
+
+    with t_portfolio:
+        st.caption("選 1～4 個標的、各自給權重，組成投資組合一起回測。"
+                   "權重不必剛好 100，程式會自動換算比例。")
+        st.caption("ℹ️ 0050 用你的內建含息資料；其餘走 Yahoo（指數為價格報酬、不含息）。"
+                   "組合會自動對齊各標的的共同年份。")
+        picks = []
+        for i in range(4):
+            col1, col2, col3 = st.columns([4, 3, 2])
+            nm = col1.selectbox(f"標的 {i+1}", list(SRC.keys()),
+                                index=(1 if i == 0 else 0), key=f"pf_name_{i}")
+            code = SRC[nm]
+            custom = ""
+            if code == "custom":
+                custom = col2.text_input("自訂代碼", key=f"pf_code_{i}",
+                                         placeholder="例如 AAPL")
+            w = col3.number_input("權重%", min_value=0.0, step=5.0,
+                                  value=(100.0 if i == 0 else 0.0), key=f"pf_w_{i}")
+            picks.append((nm, code, custom, w))
+
+        if st.button("🧺 組合並載入", type="primary"):
+            active = []
+            for nm, code, custom, w in picks:
+                tk = custom if code == "custom" else code
+                if code and w > 0 and tk:
+                    active.append((nm if code != "custom" else tk, tk, w))
+            if not active:
+                st.warning("請至少選一個標的、並把權重設成大於 0。")
+            else:
+                series, labels, ok = [], [], True
+                with st.spinner("組合資料中…"):
+                    for label, tk, w in active:
+                        if tk == "builtin":
+                            d = builtin_dict()
+                        else:
+                            try:
+                                r, info = fetch_annual_returns(tk, 1990, 2035)
+                            except Exception:
+                                r, info = None, None
+                            d = dict(zip(range(info, info + len(r)), r)) if r else None
+                        if not d:
+                            st.error(f"「{label}」抓不到資料。"); ok = False; break
+                        series.append((w, d)); labels.append(f"{label} {w:.0f}%")
+                if ok:
+                    common = set.intersection(*[set(d) for _, d in series])
+                    if not common:
+                        st.error("這些標的沒有共同年份可對齊，請換組合或縮短期間。")
+                    else:
+                        yrs = sorted(common)
+                        tw = sum(w for w, _ in series)
+                        combined = [round(sum(w / tw * d[y] for w, d in series), 1)
+                                    for y in yrs]
+                        st.session_state["returns"] = combined
+                        st.session_state["sy_w"] = yrs[0]
+                        st.session_state["data_version"] += 1
+                        st.success(f"✅ 組合完成：{' ＋ '.join(labels)}　"
+                                   f"共 {len(yrs)} 年（{yrs[0]}-{yrs[-1]}）")
 
     with t_builtin:
         st.caption("內建 0050 歷史：2004-2023 為含息（還原），2024-2025 以價格報酬估計（約少算配息）。"
